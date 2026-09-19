@@ -1,14 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent } from 'react'
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  FileCode,
+  Folder,
+  FolderOpen,
+  Search,
+} from 'lucide-react'
 import { CHANGE_COLOR, CORE_CHANGES, strongestChange } from '../palette'
 import type { ChangeGraph, ChangeKind, SymbolNode } from '../types'
 
 const CHANGE_MARK: Record<ChangeKind, string> = {
-  added: 'added',
-  modified: 'mod',
-  moved: 'moved',
-  removed: 'removed',
-  'unchanged-affected': 'affected',
+  added: '+',
+  modified: 'M',
+  moved: '→',
+  removed: '−',
+  'unchanged-affected': '~',
   unchanged: '',
 }
 
@@ -26,6 +37,7 @@ type Row = {
   /** `class` or `def`, so a row reads like the source it came from. */
   keyword?: string
   signature?: string
+  line?: number
   /** Strongest change in this row's subtree — drives colour on containers. */
   change: ChangeKind
   own: ChangeKind
@@ -87,6 +99,23 @@ function paramsOf(n: SymbolNode): string | undefined {
 
 function keywordOf(n: SymbolNode) {
   return n.kind === 'class' ? 'class' : 'def'
+}
+
+function Delta({ value }: { value: string }) {
+  return (
+    <span className="tree-delta">
+      {value.split(/\s+/).map((part) => (
+        <span
+          key={part}
+          className={
+            part.startsWith('−') || part.startsWith('-') ? 'neg' : part.startsWith('+') ? 'pos' : undefined
+          }
+        >
+          {part}
+        </span>
+      ))}
+    </span>
+  )
 }
 
 function pushInto<T>(map: Map<string, T[]>, key: string, value: T) {
@@ -157,6 +186,7 @@ function symbolForest(nodes: SymbolNode[]): Row[] {
   const toRow = (n: SymbolNode): Row => {
     const children = (childrenOf.get(n.id) ?? []).sort(bySource).map(toRow)
     const label = n.qname.split('.').pop() ?? n.qname
+    const line = lineOf(n)
     let change = n.change
     let focus = CORE_CHANGES.has(n.change) ? 1 : 0
     let changed = CORE_CHANGES.has(n.change) ? 1 : 0
@@ -173,6 +203,7 @@ function symbolForest(nodes: SymbolNode[]): Row[] {
       label,
       keyword: keywordOf(n),
       signature: paramsOf(n),
+      line: line || undefined,
       change,
       own: n.change,
       symbol: n,
@@ -331,14 +362,29 @@ function defaultExpanded(row: Row) {
   return row.focus > 0
 }
 
+function countChanged(rows: Row[], keep: (row: Row) => boolean): number {
+  let n = 0
+  const visit = (row: Row) => {
+    if (!keep(row)) return
+    if (row.kind === 'symbol' && CORE_CHANGES.has(row.own)) n += 1
+    for (const child of row.children) visit(child)
+  }
+  for (const row of rows) visit(row)
+  return n
+}
+
 export function TreeView({
   graph,
   selected,
   onSelect,
+  reviewOrder = [],
+  onReviewStep,
 }: {
   graph: ChangeGraph
   selected?: string
   onSelect: (id: string) => void
+  reviewOrder?: string[]
+  onReviewStep?: (delta: number) => void
 }) {
   const [overrides, setOverrides] = useState<Record<string, boolean>>({})
   const [bulk, setBulk] = useState<boolean | null>(null)
@@ -392,6 +438,21 @@ export function TreeView({
     return new Set([`s:${selected}`, ...(ancestors.get(selected) ?? [])])
   }, [selected, ancestors])
 
+  const degrees = useMemo(() => {
+    const map = new Map<string, { inn: number; out: number }>()
+    const bump = (id: string, key: 'inn' | 'out') => {
+      const prev = map.get(id) ?? { inn: 0, out: 0 }
+      prev[key] += 1
+      map.set(id, prev)
+    }
+    for (const e of graph.edges) {
+      if (e.kind === 'contains' || e.kind === 'invokes') continue
+      bump(e.from, 'out')
+      bump(e.to, 'inn')
+    }
+    return map
+  }, [graph])
+
   const linked = useMemo(() => {
     const map = new Map<string, 'in' | 'out' | 'both'>()
     if (!selected) return map
@@ -408,12 +469,16 @@ export function TreeView({
     return map
   }, [graph, selected])
 
-  const flat = useMemo(() => {
-    const keep = (row: Row) => {
+  const keep = useCallback(
+    (row: Row) => {
       if (matched && !matched.has(row.key)) return false
       if (changedOnly && row.focus === 0 && !selectedPath.has(row.key)) return false
       return true
-    }
+    },
+    [matched, changedOnly, selectedPath],
+  )
+
+  const flat = useMemo(() => {
     const isOpen = (row: Row) => {
       if (matched) return true
       return overrides[row.key] ?? bulk ?? defaultExpanded(row)
@@ -431,7 +496,9 @@ export function TreeView({
     }
     visit(roots, 0, [])
     return out
-  }, [roots, matched, changedOnly, selectedPath, overrides, bulk])
+  }, [roots, matched, keep, overrides, bulk])
+
+  const shownChanged = useMemo(() => countChanged(roots, keep), [roots, keep])
 
   const toggle = useCallback((row: Row, open: boolean) => {
     setOverrides((prev) => ({ ...prev, [row.key]: open }))
@@ -440,7 +507,10 @@ export function TreeView({
   const activate = useCallback(
     (f: Flat) => {
       setCursor(f.row.key)
-      if (f.row.symbol) onSelect(f.row.symbol.id)
+      if (f.row.symbol) {
+        onSelect(f.row.symbol.id)
+        return
+      }
       if (f.expandable) toggle(f.row, !f.expanded)
     },
     [onSelect, toggle],
@@ -510,50 +580,98 @@ export function TreeView({
       }
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault()
+        if (current.row.symbol) {
+          onSelect(current.row.symbol.id)
+          if (event.key === ' ' && current.expandable) toggle(current.row, !current.expanded)
+          return
+        }
         activate(current)
       }
     },
-    [flat, cursorKey, move, toggle, activate],
+    [flat, cursorKey, move, toggle, activate, onSelect],
   )
 
-  const shownChanged = flat.reduce((acc, f) => acc + (f.row.kind === 'symbol' && CORE_CHANGES.has(f.row.own) ? 1 : 0), 0)
+  const reviewIndex = selected ? reviewOrder.indexOf(selected) : -1
+  const reviewPos = reviewIndex >= 0 ? reviewIndex + 1 : 0
+  const reviewTotal = reviewOrder.length
 
   return (
     <div className="pane tree-pane">
       <div className="tree-toolbar">
-        <input
-          className="tree-search"
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter symbols…"
-        />
+        <label className="tree-search-shell">
+          <Search aria-hidden="true" />
+          <input
+            className="tree-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter symbols…"
+            aria-label="Filter symbols"
+          />
+        </label>
         <label className="tree-check">
           <input
             type="checkbox"
             checked={changedOnly}
             onChange={(e) => setChangedOnly(e.target.checked)}
           />
-          Changed only
+          Changed
         </label>
-        <button
-          onClick={() => {
-            setOverrides({})
-            setBulk(true)
-          }}
-        >
-          Expand all
-        </button>
-        <button
-          onClick={() => {
-            setOverrides({})
-            setBulk(false)
-          }}
-        >
-          Collapse all
-        </button>
+        <div className="tree-actions">
+          <button
+            type="button"
+            className="tree-icon-btn"
+            title="Expand all"
+            aria-label="Expand all"
+            onClick={() => {
+              setOverrides({})
+              setBulk(true)
+            }}
+          >
+            <ChevronsUpDown aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="tree-icon-btn"
+            title="Collapse all"
+            aria-label="Collapse all"
+            onClick={() => {
+              setOverrides({})
+              setBulk(false)
+            }}
+          >
+            <ChevronsDownUp aria-hidden="true" />
+          </button>
+        </div>
+        {reviewTotal > 0 && (
+          <div className="tree-review">
+            <button
+              type="button"
+              className="tree-icon-btn"
+              title="Previous in review order (k)"
+              aria-label="Previous in review order"
+              disabled={reviewPos <= 1}
+              onClick={() => onReviewStep?.(-1)}
+            >
+              <ChevronLeft aria-hidden="true" />
+            </button>
+            <span className="tree-review-pos" title="Review order — j / k">
+              {reviewPos || '–'} / {reviewTotal}
+            </span>
+            <button
+              type="button"
+              className="tree-icon-btn"
+              title="Next in review order (j)"
+              aria-label="Next in review order"
+              disabled={reviewPos >= reviewTotal && reviewPos !== 0}
+              onClick={() => onReviewStep?.(1)}
+            >
+              <ChevronRight aria-hidden="true" />
+            </button>
+          </div>
+        )}
         <span className="tree-stat">
-          {fileCount} {fileCount === 1 ? 'file' : 'files'} · {symbolCount} symbols · {shownChanged} changed shown
+          {fileCount} {fileCount === 1 ? 'file' : 'files'} · {shownChanged} changed
         </span>
       </div>
 
@@ -570,12 +688,17 @@ export function TreeView({
               const { row } = f
               const color = CHANGE_COLOR[row.kind === 'symbol' ? row.own : row.change]
               const isSelected = row.symbol?.id === selected
+              const onPath = selectedPath.has(row.key)
               const link = row.symbol ? linked.get(row.symbol.id) : undefined
+              const deg = row.symbol ? degrees.get(row.symbol.id) : undefined
+              const changeKind = row.kind === 'symbol' ? row.own : row.change
               const classes = [
                 'tree-row',
                 `tree-${row.kind}`,
-                CORE_CHANGES.has(row.kind === 'symbol' ? row.own : row.change) ? 'core' : '',
+                `chg-${changeKind}`,
+                CORE_CHANGES.has(changeKind) ? 'core' : '',
                 isSelected ? 'selected' : '',
+                !isSelected && onPath ? 'on-path' : '',
                 link ? 'linked' : '',
               ]
                 .filter(Boolean)
@@ -618,31 +741,74 @@ export function TreeView({
                         toggle(row, !f.expanded)
                       }}
                     >
-                      {f.expanded ? '▾' : '▸'}
+                      {f.expanded ? (
+                        <ChevronDown aria-hidden="true" />
+                      ) : (
+                        <ChevronRight aria-hidden="true" />
+                      )}
                     </span>
                   ) : (
                     <span className="tree-twisty empty" />
                   )}
 
+                  {row.kind === 'dir' && (
+                    <span className="tree-glyph">
+                      {f.expanded ? (
+                        <FolderOpen aria-hidden="true" />
+                      ) : (
+                        <Folder aria-hidden="true" />
+                      )}
+                    </span>
+                  )}
+                  {row.kind === 'file' && (
+                    <span className="tree-glyph">
+                      <FileCode aria-hidden="true" />
+                    </span>
+                  )}
+
                   <span className="tree-label">
-                    {row.keyword && <span className="tree-kw">{row.keyword}</span>}
+                    {row.keyword && (
+                      <span className={`tree-kw ${row.keyword === 'class' ? 'kw-class' : 'kw-def'}`}>
+                        {row.keyword}
+                      </span>
+                    )}
                     {row.prefix && <span className="tree-prefix">{row.prefix}</span>}
                     <span className="tree-name">{row.label}</span>
+                    {row.keyword === 'class' && <span className="tree-colon">:</span>}
                     {row.signature && <span className="tree-sig">{row.signature}</span>}
                   </span>
 
-                  {link && (
-                    <span className="tree-link" title={link === 'in' ? 'calls the selection' : 'used by the selection'}>
-                      {link === 'in' ? '←' : link === 'out' ? '→' : '↔'}
-                    </span>
-                  )}
-                  {row.delta && <span className="tree-delta">{row.delta}</span>}
-                  {row.kind !== 'symbol' && row.changed > 0 && (
-                    <span className="tree-count">{row.changed}</span>
-                  )}
-                  {CHANGE_MARK[row.own] && row.kind === 'symbol' && (
-                    <span className="tree-chip">{CHANGE_MARK[row.own]}</span>
-                  )}
+                  <span className="tree-meta">
+                    {isSelected && deg && (deg.inn > 0 || deg.out > 0) && (
+                      <span className="tree-rel" title="Likely callers and callees">
+                        {deg.inn > 0 && `${deg.inn} caller${deg.inn === 1 ? '' : 's'}`}
+                        {deg.inn > 0 && deg.out > 0 && ' · '}
+                        {deg.out > 0 && `${deg.out} callee${deg.out === 1 ? '' : 's'}`}
+                      </span>
+                    )}
+                    {link && (
+                      <span
+                        className="tree-link"
+                        title={
+                          link === 'in'
+                            ? 'calls the selection'
+                            : link === 'out'
+                              ? 'used by the selection'
+                              : 'calls and is used by the selection'
+                        }
+                      >
+                        {link === 'in' ? '←' : link === 'out' ? '→' : '↔'}
+                      </span>
+                    )}
+                    {row.delta && <Delta value={row.delta} />}
+                    {row.kind !== 'symbol' && row.changed > 0 && (
+                      <span className="tree-count">{row.changed}</span>
+                    )}
+                    {CHANGE_MARK[row.own] && row.kind === 'symbol' && (
+                      <span className={`tree-chip chg-${row.own}`}>{CHANGE_MARK[row.own]}</span>
+                    )}
+                    {row.line != null && <span className="tree-line">L{row.line}</span>}
+                  </span>
                 </div>
               )
             })}

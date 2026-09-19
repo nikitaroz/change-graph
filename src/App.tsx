@@ -11,8 +11,22 @@ import { TreeView } from './components/TreeView'
 import { CORE_CHANGES as CORE } from './palette'
 import type { ChangeGraph, ChangeKind, SymbolNode } from './types'
 
-const PANEL_LAYOUT_KEY = 'change-graph:panel-layout-v2'
-const DEFAULT_PANEL_LAYOUT: Layout = { sidebar: 22, tree: 50, details: 28 }
+const PANEL_LAYOUT_KEY = 'change-graph:panel-layout-v3'
+const DEFAULT_PANEL_LAYOUT: Layout = { sidebar: 18, tree: 52, details: 30 }
+const COMPACT_QUERY = '(max-width: 720px)'
+const NARROW_QUERY = '(max-width: 980px)'
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const sync = () => setMatches(media.matches)
+    sync()
+    media.addEventListener('change', sync)
+    return () => media.removeEventListener('change', sync)
+  }, [query])
+  return matches
+}
 
 function loadPanelLayout(): Layout {
   try {
@@ -162,6 +176,48 @@ function PrDescription({ markdown }: { markdown: string }) {
   )
 }
 
+function PrSidebar({
+  graph,
+  description,
+  repoUrl,
+  collapsed,
+  onToggle,
+}: {
+  graph: ChangeGraph
+  description?: string
+  repoUrl?: string
+  collapsed: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="pane sidebar">
+      <button
+        className="sidebar-toggle"
+        type="button"
+        aria-label={collapsed ? 'Expand PR sidebar' : 'Collapse PR sidebar'}
+        aria-pressed={collapsed}
+        onClick={onToggle}
+      >
+        {collapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}
+      </button>
+      <div className="pr-context">
+        <span className="pr-eyebrow">
+          <a href={repoUrl} target="_blank" rel="noreferrer">
+            {graph.pr.owner}/{graph.pr.repo}
+          </a>
+          {' · '}#{graph.pr.number}
+        </span>
+        <h1>
+          <a href={graph.pr.url} target="_blank" rel="noreferrer">
+            {graph.pr.title}
+          </a>
+        </h1>
+        {description && <PrDescription markdown={description} />}
+      </div>
+    </div>
+  )
+}
+
 function neighbors(graph: ChangeGraph, id: string) {
   const byId = new Map(graph.nodes.map((n) => [n.id, n]))
   const callers: { node: SymbolNode; kind: string }[] = []
@@ -291,7 +347,11 @@ export default function App() {
   const [error, setError] = useState<string>()
   const [selected, setSelected] = useState<string>()
   const [trail, setTrail] = useState<Trail>(EMPTY_TRAIL)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia(NARROW_QUERY).matches)
+  const [busy, setBusy] = useState(false)
+  const compact = useMediaQuery(COMPACT_QUERY)
+  const narrow = useMediaQuery(NARROW_QUERY)
+  const wasCompact = useRef(compact)
   const sidebarRef = usePanelRef()
   const loadRun = useRef(0)
 
@@ -323,12 +383,22 @@ export default function App() {
     })
   }, [graph])
 
+  const stepReview = useCallback(
+    (delta: number) => {
+      const idx = selected ? pythonOrder.indexOf(selected) : -1
+      const next = delta > 0 ? Math.min(pythonOrder.length - 1, idx + 1) : Math.max(0, idx < 0 ? 0 : idx - 1)
+      if (pythonOrder[next] && pythonOrder[next] !== selected) select(pythonOrder[next])
+    },
+    [selected, pythonOrder, select],
+  )
+
   const loadFromParts = useCallback(
     async (loader: () => Promise<{ pr: ChangeGraph['pr']; files: ChangeGraph['files'] }>) => {
       // Only the newest load may touch state; an earlier one finishing later must not win.
       const run = ++loadRun.current
       const current = () => run === loadRun.current
       setError(undefined)
+      setBusy(true)
       setStatus('Fetching…')
       try {
         const { pr, files } = await loader()
@@ -351,6 +421,8 @@ export default function App() {
         if (!current()) return
         setError(e instanceof Error ? e.message : String(e))
         setStatus('Failed')
+      } finally {
+        if (current()) setBusy(false)
       }
     },
     [],
@@ -391,21 +463,39 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (compact && !wasCompact.current) setSidebarOpen(false)
+    if (!compact && wasCompact.current) setSidebarOpen(!narrow)
+    wasCompact.current = compact
+  }, [compact, narrow])
+
+  useEffect(() => {
+    if (!graph || compact) return
+    if (narrow) sidebarRef.current?.collapse()
+    else sidebarRef.current?.expand()
+  }, [graph, compact, narrow])
+
+  const toggleSidebar = useCallback(() => {
+    if (compact) {
+      setSidebarOpen((open) => !open)
+      return
+    }
+    if (sidebarRef.current?.isCollapsed()) sidebarRef.current.expand()
+    else sidebarRef.current?.collapse()
+  }, [compact])
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target
       if (target instanceof HTMLElement && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
       if (!graph) return
-      if (e.key === 'j' || e.key === 'k') {
-        const idx = selected ? pythonOrder.indexOf(selected) : -1
-        const next = e.key === 'j' ? Math.min(pythonOrder.length - 1, idx + 1) : Math.max(0, idx - 1)
-        if (pythonOrder[next]) select(pythonOrder[next])
-      }
+      if (e.key === 'j') stepReview(1)
+      if (e.key === 'k') stepReview(-1)
       if (e.key === ']') step(1)
       if (e.key === '[') step(-1)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [graph, selected, step, select, pythonOrder])
+  }, [graph, step, stepReview])
 
   const node = graph?.nodes.find((n) => n.id === selected)
   const description = prepareMarkdown(graph?.pr.description)
@@ -415,6 +505,17 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
+        {graph && (
+          <button
+            className="sidebar-toggle topbar-sidebar-toggle"
+            type="button"
+            aria-label={sidebarOpen ? 'Collapse PR sidebar' : 'Expand PR sidebar'}
+            aria-pressed={!sidebarOpen}
+            onClick={toggleSidebar}
+          >
+            {sidebarOpen ? <PanelLeftClose aria-hidden="true" /> : <PanelLeftOpen aria-hidden="true" />}
+          </button>
+        )}
         <div className="brand">
           <span className="brand-mark">
             <GitPullRequest aria-hidden="true" />
@@ -432,10 +533,14 @@ export default function App() {
               type="text"
               value={prUrl}
               onChange={(e) => setPrUrl(e.target.value)}
-              placeholder="GitHub PR URL — press Enter to load"
+              placeholder="GitHub PR URL"
               aria-label="GitHub PR URL"
+              disabled={busy}
             />
           </label>
+          <button className="sr-only" type="submit" disabled={busy || !prUrl.trim()}>
+            Load pull request
+          </button>
         </form>
       </header>
 
@@ -447,74 +552,107 @@ export default function App() {
         </span>
       </div>
 
-      <div className={`panes ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
+      <div className={`panes ${sidebarOpen ? '' : 'sidebar-collapsed'} ${compact ? 'is-compact' : ''}`}>
         {graph ? (
-          <Group
-            className="workspace"
-            defaultLayout={panelLayout}
-            id="review-workspace"
-            onLayoutChanged={(layout, { isUserInteraction }) => {
-              if (isUserInteraction) savePanelLayout(layout)
-            }}
-            orientation="horizontal"
-          >
-            <Panel
-              className="sidebar-panel"
-              collapsedSize="44px"
-              collapsible
-              defaultSize="244px"
-              id="sidebar"
-              maxSize="45%"
-              minSize="180px"
-              panelRef={sidebarRef}
-              onResize={() => {
-                setSidebarOpen(!sidebarRef.current?.isCollapsed())
-              }}
-            >
-              <div className="pane sidebar">
-                <button
-                  className="sidebar-toggle"
-                  type="button"
-                  aria-label={sidebarOpen ? 'Collapse PR sidebar' : 'Expand PR sidebar'}
-                  aria-pressed={!sidebarOpen}
-                  onClick={() => {
-                    if (sidebarRef.current?.isCollapsed()) sidebarRef.current.expand()
-                    else sidebarRef.current?.collapse()
+          <>
+            {compact && sidebarOpen && (
+              <button
+                type="button"
+                className="sidebar-backdrop"
+                aria-label="Close PR sidebar"
+                onClick={() => setSidebarOpen(false)}
+              />
+            )}
+            {compact && (
+              <div
+                className={`sidebar-drawer ${sidebarOpen ? 'is-open' : ''}`}
+                aria-hidden={!sidebarOpen}
+                inert={!sidebarOpen || undefined}
+              >
+                <PrSidebar
+                  graph={graph}
+                  description={description}
+                  repoUrl={repoUrl}
+                  collapsed={!sidebarOpen}
+                  onToggle={toggleSidebar}
+                />
+              </div>
+            )}
+            {compact ? (
+              <Group
+                className="workspace"
+                defaultLayout={{ tree: 58, details: 42 }}
+                id="review-workspace-compact"
+                orientation="vertical"
+              >
+                <Panel className="tree-panel" id="tree" minSize="28%">
+                  <TreeView
+                    graph={graph}
+                    selected={selected}
+                    onSelect={select}
+                    reviewOrder={pythonOrder}
+                    onReviewStep={stepReview}
+                  />
+                </Panel>
+                <Separator className="resize-handle" />
+                <Panel className="details-panel" id="details" minSize="22%" maxSize="75%">
+                  <Details graph={graph} node={node} onSelect={select} />
+                </Panel>
+              </Group>
+            ) : (
+              <Group
+                className="workspace"
+                defaultLayout={panelLayout}
+                id="review-workspace"
+                onLayoutChanged={(layout, { isUserInteraction }) => {
+                  if (isUserInteraction) savePanelLayout(layout)
+                }}
+                orientation="horizontal"
+              >
+                <Panel
+                  className="sidebar-panel"
+                  collapsedSize="44px"
+                  collapsible
+                  defaultSize="244px"
+                  id="sidebar"
+                  maxSize="280px"
+                  minSize="180px"
+                  panelRef={sidebarRef}
+                  onResize={() => {
+                    setSidebarOpen(!sidebarRef.current?.isCollapsed())
                   }}
                 >
-                  {sidebarOpen ? (
-                    <PanelLeftClose aria-hidden="true" />
-                  ) : (
-                    <PanelLeftOpen aria-hidden="true" />
-                  )}
-                </button>
-                <div className="pr-context">
-                  <span className="pr-eyebrow">
-                    <a href={repoUrl} target="_blank" rel="noreferrer">
-                      {graph.pr.owner}/{graph.pr.repo}
-                    </a>
-                    {' · '}#{graph.pr.number}
-                  </span>
-                  <h1>
-                    <a href={graph.pr.url} target="_blank" rel="noreferrer">
-                      {graph.pr.title}
-                    </a>
-                  </h1>
-                  {description && <PrDescription markdown={description} />}
-                </div>
-              </div>
-            </Panel>
-            <Separator className="resize-handle" />
-            <Panel className="tree-panel" id="tree" minSize="280px">
-              <TreeView graph={graph} selected={selected} onSelect={select} />
-            </Panel>
-            <Separator className="resize-handle" />
-            <Panel className="details-panel" id="details" minSize="240px" maxSize="50%">
-              <Details graph={graph} node={node} onSelect={select} />
-            </Panel>
-          </Group>
+                  <PrSidebar
+                    graph={graph}
+                    description={description}
+                    repoUrl={repoUrl}
+                    collapsed={!sidebarOpen}
+                    onToggle={toggleSidebar}
+                  />
+                </Panel>
+                <Separator className="resize-handle" />
+                <Panel className="tree-panel" id="tree" minSize="200px">
+                  <TreeView
+                    graph={graph}
+                    selected={selected}
+                    onSelect={select}
+                    reviewOrder={pythonOrder}
+                    onReviewStep={stepReview}
+                  />
+                </Panel>
+                <Separator className="resize-handle" />
+                <Panel className="details-panel" id="details" minSize="200px" maxSize="50%">
+                  <Details graph={graph} node={node} onSelect={select} />
+                </Panel>
+              </Group>
+            )}
+          </>
         ) : (
-          <p className="empty pad">Loading a pull request turns files into a tree of symbols.</p>
+          <p className="empty pad">
+            {busy
+              ? 'Loading a pull request turns files into a tree of symbols.'
+              : 'Paste a GitHub pull request URL and press Enter.'}
+          </p>
         )}
       </div>
     </div>
