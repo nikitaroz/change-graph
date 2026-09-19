@@ -13,6 +13,8 @@ Paste a GitHub pull request URL and press Enter. Calls are unauthenticated, so p
 
 Deep link: `http://localhost:5173/?pr=https://github.com/astral-sh/uv/pull/21827`
 
+Live: `https://nikitaroz.github.io/change-graph/?pr=https://github.com/astral-sh/uv/pull/21827`
+
 ## The view
 
 The main view is a symbol tree, grouped by file.
