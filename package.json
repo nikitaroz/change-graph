@@ -1,0 +1,30 @@
+{
+  "name": "change-graph",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "diff": "^8.0.2",
+    "lucide-react": "^1.47.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^4.12.4",
+    "remark-gfm": "^4.0.1",
+    "tree-sitter-wasm": "^2.0.1",
+    "web-tree-sitter": "^0.26.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.3",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.5"
+  }
+}
